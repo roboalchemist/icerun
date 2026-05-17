@@ -187,3 +187,6 @@ def parse(
     if parser not in _PARSERS:
         raise ValueError(f"Unknown parser '{parser}'. Choose from: {', '.join(PARSERS)}")
     return _PARSERS[parser](html, url)
+
+
+parse_html = parse
