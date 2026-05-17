@@ -511,7 +511,48 @@ def map_cmd(
     format: str = typer.Option("lines", "--format", "-f", help="Output: lines|json|csv"),
 ) -> None:
     """Discover all URLs on a site without downloading content."""
-    _not_implemented("map")
+    import icerun.crawler as crawler
+
+    results = asyncio.run(
+        crawler.map_site(
+            url,
+            limit=limit,
+            filter_pattern=filter_pattern,
+            crawl_fallback=crawl_fallback,
+            depth=depth,
+        )
+    )
+
+    if format == "lines":
+        output_text = "\n".join(r.url for r in results)
+    elif format == "json":
+        output_text = json.dumps(
+            [
+                {
+                    "url": r.url,
+                    "source": r.source,
+                    "last_modified": r.last_modified,
+                }
+                for r in results
+            ],
+            indent=2,
+        )
+    elif format == "csv":
+        lines = ["url,source,depth,parent"] + [
+            f"{r.url},{r.source},{r.depth},{r.parent or ''}"
+            for r in results
+        ]
+        output_text = "\n".join(lines)
+    else:
+        typer.echo(f"Error: unknown format {format!r}", err=True)
+        raise typer.Exit(2)
+
+    typer.echo(f"Found {len(results)} URLs", err=True)
+
+    if output:
+        output.write_text(output_text, encoding="utf-8")
+    else:
+        typer.echo(output_text, nl=False)
 
 
 @app.command()

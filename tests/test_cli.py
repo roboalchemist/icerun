@@ -230,9 +230,24 @@ def test_batch_error_handling(tmp_path):
     assert len(output_files) == 1
 
 
-def test_map_stub_exits_1():
-    result = runner.invoke(app, ["map", "https://example.com"])
-    assert result.exit_code == 1
+def test_map_cmd_lines_format():
+    """map command with mocked map_site returns one URL per line."""
+    from icerun.crawler import DiscoveredURL
+
+    fake_results = [
+        DiscoveredURL(url="https://example.com/page1", source="sitemap", depth=0, parent="https://example.com/sitemap.xml", last_modified="2024-01-01"),
+        DiscoveredURL(url="https://example.com/page2", source="sitemap", depth=0, parent="https://example.com/sitemap.xml", last_modified=None),
+    ]
+
+    with patch("icerun.crawler.map_site", new=AsyncMock(return_value=fake_results)):
+        result = runner.invoke(app, ["map", "https://example.com"])
+
+    assert result.exit_code == 0, f"output: {result.output}, exc: {result.exception}"
+    # Filter to only URL lines (typer CliRunner mixes stdout+stderr in result.output)
+    url_lines = [l for l in result.output.strip().splitlines() if l.startswith("https://")]
+    assert "https://example.com/page1" in url_lines
+    assert "https://example.com/page2" in url_lines
+    assert len(url_lines) == 2
 
 
 def test_search_stub_exits_1():
