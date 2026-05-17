@@ -8,7 +8,7 @@ from icerun.config import (
 )
 
 
-def test_defaults_loaded():
+def test_defaults_loaded(clean_config):
     config, sources = load_config(cwd=Path("/nonexistent"))
     assert config["defaults"]["parser"] == "trafilatura"
     assert config["defaults"]["format"] == "markdown"
