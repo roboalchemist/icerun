@@ -96,11 +96,15 @@ async def _collect(gen) -> list[CrawlResult]:
 
 @pytest.mark.asyncio
 async def test_crawl_basic():
-    """3 pages are yielded at depth=2 (a, b, c — not d)."""
+    """depth=1 yields seed + its direct links (a, b, c — not d).
+
+    Semantics: depth=N means N hops from the seed.
+    depth=1 → seed (depth-0) enqueues b,c; b,c (depth-1) do NOT enqueue further.
+    """
     mock_fetch = _make_fetch_mock(PAGES)
     with patch("icerun.scraper.fetch", new=mock_fetch):
         results = await _collect(
-            crawl("https://example.com/a", depth=2, limit=100,
+            crawl("https://example.com/a", depth=1, limit=100,
                   same_domain=True, delay=0, concurrency=1, ignore_robots=True)
         )
     urls = {r.url for r in results}
@@ -112,11 +116,11 @@ async def test_crawl_basic():
 
 @pytest.mark.asyncio
 async def test_crawl_depth_limit():
-    """page_d should NOT be fetched at depth=2."""
+    """page_d should NOT be fetched at depth=1 (d is 2 hops from seed)."""
     mock_fetch = _make_fetch_mock(PAGES)
     with patch("icerun.scraper.fetch", new=mock_fetch):
         results = await _collect(
-            crawl("https://example.com/a", depth=2, limit=100,
+            crawl("https://example.com/a", depth=1, limit=100,
                   same_domain=True, delay=0, concurrency=1, ignore_robots=True)
         )
     urls = {r.url for r in results}

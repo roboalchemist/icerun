@@ -101,6 +101,8 @@ async def crawl(
     visited: set[str] = set()
     queue: asyncio.Queue = asyncio.Queue()
     yielded_count = 0
+    # Track items dequeued but not yet yielded (in-flight fetches).
+    in_flight = 0
 
     norm_start = _normalize(start_url)
     visited.add(norm_start)
@@ -110,8 +112,11 @@ async def crawl(
     done_event = asyncio.Event()
     # Use an asyncio.Queue as a result channel from workers back to the main loop.
     result_queue: asyncio.Queue = asyncio.Queue()
+    # Lock guards in_flight counter mutations.
+    in_flight_lock = asyncio.Lock()
 
     async def _worker() -> None:
+        nonlocal in_flight
         while not done_event.is_set():
             try:
                 item = queue.get_nowait()
@@ -120,37 +125,41 @@ async def crawl(
                 await asyncio.sleep(0.01)
                 continue
 
+            async with in_flight_lock:
+                in_flight += 1
+
             url, current_depth = item
             try:
                 fetch_result = await scraper.fetch(url, rate_limiter=rate_limiter)
                 if fetch_result.error or fetch_result.status_code == 0:
-                    queue.task_done()
-                    continue
+                    return_item = None
+                else:
+                    # Extract links from page
+                    links = _extract_links(fetch_result.content, url)
 
-                # Extract links from page
-                links = _extract_links(fetch_result.content, url)
+                    # Enqueue new links only if we haven't hit the depth cap.
+                    # depth=1 means "seed + direct links", depth=N means N hops from seed.
+                    if current_depth < depth:
+                        for link in links:
+                            norm = _normalize(link)
+                            if norm not in visited and _should_follow(link):
+                                visited.add(norm)
+                                await queue.put((link, current_depth + 1))
 
-                # Enqueue new links (only if we haven't reached max depth).
-                # depth=N means: fetch up to N hops from start (depths 0..N-1).
-                # Links discovered at depth N-1 would land at depth N, which is
-                # beyond the limit, so we don't enqueue them.
-                if current_depth < depth - 1:
-                    for link in links:
-                        norm = _normalize(link)
-                        if norm not in visited and _should_follow(link):
-                            visited.add(norm)
-                            await queue.put((link, current_depth + 1))
-
-                await result_queue.put(CrawlResult(
-                    url=url,
-                    depth=current_depth,
-                    content=fetch_result.content,
-                    links=links,
-                ))
+                    return_item = CrawlResult(
+                        url=url,
+                        depth=current_depth,
+                        content=fetch_result.content,
+                        links=links,
+                    )
             except Exception:
-                pass
+                return_item = None
             finally:
                 queue.task_done()
+                async with in_flight_lock:
+                    in_flight -= 1
+                if return_item is not None:
+                    await result_queue.put(return_item)
 
     # Start worker pool
     workers = [asyncio.ensure_future(_worker()) for _ in range(concurrency)]
@@ -166,14 +175,13 @@ async def crawl(
             except asyncio.QueueEmpty:
                 pass
 
-            # Check if all work is done
-            if queue.empty() and result_queue.empty():
-                # Give workers a moment to finish any in-flight items
-                await asyncio.sleep(0.05)
-                if queue.empty() and result_queue.empty():
-                    break
+            # All work is done when both queues are empty AND no fetch is in-flight.
+            async with in_flight_lock:
+                all_idle = queue.empty() and result_queue.empty() and in_flight == 0
+            if all_idle:
+                break
 
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
 
         # Drain any remaining results up to the limit
         while yielded_count < limit and not result_queue.empty():

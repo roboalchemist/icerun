@@ -27,21 +27,32 @@ app.add_typer(config_app, name="config")
 def _sanitize_for_json(obj: object) -> object:
     """Recursively convert an object to JSON-serializable types.
 
-    Handles lxml _Element objects and any other non-serializable types by
-    converting them to their string representation.
+    lxml _Element objects (e.g. trafilatura metadata body/commentsbody) are
+    dropped (returned as None) rather than stringified as "<Element ...>".
     """
     if obj is None or isinstance(obj, (bool, int, float, str)):
         return obj
     if isinstance(obj, dict):
-        return {str(k): _sanitize_for_json(v) for k, v in obj.items()}
+        out = {}
+        for k, v in obj.items():
+            sanitized = _sanitize_for_json(v)
+            # Drop keys whose value couldn't be meaningfully serialized
+            if sanitized is not None or v is None:
+                out[str(k)] = sanitized
+        return out
     if isinstance(obj, (list, tuple)):
         return [_sanitize_for_json(item) for item in obj]
-    # Fallback: convert to string (handles lxml _Element and other opaque types)
+    # Check if directly serializable
     try:
         json.dumps(obj)
         return obj
     except (TypeError, ValueError):
-        return str(obj)
+        pass
+    # lxml elements and other opaque C objects: drop them
+    module = type(obj).__module__ or ""
+    if "lxml" in module or "Element" in type(obj).__name__:
+        return None
+    return str(obj)
 
 
 def _not_implemented(cmd: str) -> None:
