@@ -171,7 +171,7 @@ def config_set(
         set_config_value(key, value)
         console.print(f"[green]Set[/green] {key} = {value!r}")
     except ValueError as e:
-        console.print(f"[red]Error:[/red] {e}", err=True)
+        Console(stderr=True).print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
 
