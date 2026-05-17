@@ -136,16 +136,43 @@ def job_clean(
 @config_app.command("show")
 def config_show() -> None:
     """Show effective configuration (merged from all sources)."""
-    _not_implemented("config show")
+    from icerun.config import load_config
+    from rich.console import Console
+    from rich.table import Table
+
+    config, sources = load_config()
+    console = Console()
+    table = Table(title="icerun configuration", show_header=True)
+    table.add_column("Section", style="cyan")
+    table.add_column("Key", style="green")
+    table.add_column("Value")
+    table.add_column("Source", style="dim")
+
+    for section, keys in config.items():
+        if isinstance(keys, dict):
+            for key, val in keys.items():
+                display = "***" if key == "api_key" and val else str(val)
+                source = sources.get(section, {}).get(key, "default")
+                table.add_row(section, key, display, source)
+
+    console.print(table)
 
 
 @config_app.command("set")
 def config_set(
-    key: str = typer.Argument(..., help="Config key (e.g. proxy.api_key)"),
+    key: str = typer.Argument(..., help="Config key (section.key, e.g. proxy.api_key)"),
     value: str = typer.Argument(..., help="Value to set"),
 ) -> None:
     """Set a configuration value in the user config file."""
-    _not_implemented("config set")
+    from icerun.config import set_config_value
+    from rich.console import Console
+    console = Console()
+    try:
+        set_config_value(key, value)
+        console.print(f"[green]Set[/green] {key} = {value!r}")
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}", err=True)
+        raise typer.Exit(1)
 
 
 def main() -> None:
