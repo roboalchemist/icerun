@@ -901,6 +901,7 @@ pdf = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pydantic" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -925,6 +926,7 @@ provides-extras = ["browser", "extract", "pdf", "all"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
 ]

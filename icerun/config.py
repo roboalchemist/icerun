@@ -92,6 +92,14 @@ def _apply_env_vars(config: dict, sources: dict) -> tuple[dict, dict]:
         config["browser"]["headless"] = False
         sources.setdefault("browser", {})["headless"] = "env:ICER_BROWSER"
 
+    # ICER_LLM_MODEL and ICER_LLM_PROVIDER env vars
+    if os.environ.get("ICER_LLM_MODEL"):
+        config.setdefault("llm", {})["model"] = os.environ["ICER_LLM_MODEL"]
+        sources.setdefault("llm", {})["model"] = "env:ICER_LLM_MODEL"
+    if os.environ.get("ICER_LLM_PROVIDER"):
+        config.setdefault("llm", {})["provider"] = os.environ["ICER_LLM_PROVIDER"]
+        sources.setdefault("llm", {})["provider"] = "env:ICER_LLM_PROVIDER"
+
     # LLM API keys from standard env vars
     provider = config["llm"].get("provider", "anthropic")
     if not config["llm"].get("api_key"):
