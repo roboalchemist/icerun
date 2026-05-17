@@ -121,9 +121,113 @@ def test_scrape_output_file(tmp_path):
     assert len(out_file.read_text()) > 0
 
 
-def test_batch_stub_exits_1():
+def test_batch_missing_file():
+    """Non-existent file → exit 1."""
     result = runner.invoke(app, ["batch", "/nonexistent-file.txt"])
     assert result.exit_code == 1
+
+
+def test_batch_empty_file(tmp_path):
+    """Empty URL file → exit 1."""
+    url_file = tmp_path / "urls.txt"
+    url_file.write_text("# just a comment\n\n", encoding="utf-8")
+    out_dir = tmp_path / "output"
+    result = runner.invoke(app, ["batch", str(url_file), "--output", str(out_dir)])
+    assert result.exit_code == 1
+
+
+def test_batch_processes_urls(tmp_path):
+    """Mock fetch for 2 URLs; verify 2 output files are created."""
+    url_file = tmp_path / "urls.txt"
+    url_file.write_text(
+        "https://example.com/page1\nhttps://example.com/page2\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "output"
+
+    mock_result1 = _make_fetch_result(url="https://example.com/page1", final_url="https://example.com/page1")
+    mock_result2 = _make_fetch_result(url="https://example.com/page2", final_url="https://example.com/page2")
+
+    call_count = 0
+
+    async def mock_fetch(url, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if "page1" in url:
+            return mock_result1
+        return mock_result2
+
+    with patch("icerun.scraper.fetch", side_effect=mock_fetch):
+        result = runner.invoke(app, ["batch", str(url_file), "--output", str(out_dir)])
+
+    assert result.exit_code == 0, f"stdout: {result.output}\nexc: {result.exception}"
+    output_files = list(out_dir.glob("*.md"))
+    assert len(output_files) == 2
+    assert call_count == 2
+
+
+def test_batch_resume_skips_existing(tmp_path):
+    """With --resume, skip URLs whose output file already exists."""
+    url_file = tmp_path / "urls.txt"
+    url_file.write_text(
+        "https://example.com/page1\nhttps://example.com/page2\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "output"
+    out_dir.mkdir()
+
+    # Pre-create the output file for page1 (hash naming)
+    import hashlib
+    hash1 = hashlib.sha256("https://example.com/page1".encode()).hexdigest()[:16]
+    (out_dir / f"{hash1}.md").write_text("already scraped", encoding="utf-8")
+
+    call_count = 0
+
+    async def mock_fetch(url, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return _make_fetch_result(url=url, final_url=url)
+
+    with patch("icerun.scraper.fetch", side_effect=mock_fetch):
+        result = runner.invoke(
+            app, ["batch", str(url_file), "--output", str(out_dir), "--resume"]
+        )
+
+    assert result.exit_code == 0, f"stdout: {result.output}\nexc: {result.exception}"
+    # Only page2 should have been fetched
+    assert call_count == 1
+
+
+def test_batch_error_handling(tmp_path):
+    """One URL fails → written to errors.txt; other URL still processes."""
+    url_file = tmp_path / "urls.txt"
+    url_file.write_text(
+        "https://example.com/ok\nhttps://example.com/fail\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "output"
+    errors_path = tmp_path / "errors.txt"
+
+    async def mock_fetch(url, **kwargs):
+        if "fail" in url:
+            return _make_fetch_result(url=url, final_url=url, status_code=0, content=b"", error="connection error")
+        return _make_fetch_result(url=url, final_url=url)
+
+    with patch("icerun.scraper.fetch", side_effect=mock_fetch):
+        result = runner.invoke(
+            app,
+            ["batch", str(url_file), "--output", str(out_dir), "--errors-file", str(errors_path)],
+        )
+
+    # exit 0 because at least 1 succeeded
+    assert result.exit_code == 0, f"stdout: {result.output}\nexc: {result.exception}"
+    # errors.txt should contain the failed URL
+    assert errors_path.exists()
+    errors_content = errors_path.read_text(encoding="utf-8")
+    assert "https://example.com/fail" in errors_content
+    # Successful URL should produce an output file
+    output_files = list(out_dir.glob("*.md"))
+    assert len(output_files) == 1
 
 
 def test_map_stub_exits_1():
