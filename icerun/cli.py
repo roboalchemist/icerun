@@ -217,9 +217,78 @@ def crawl(
     concurrency: int = typer.Option(3, "--concurrency", "-c", help="Parallel fetches"),
     delay: float = typer.Option(1.0, "--delay", help="Seconds between requests to same domain"),
     sitemap: bool = typer.Option(False, "--sitemap", help="Use sitemap.xml for seed URLs"),
+    ignore_robots: bool = typer.Option(False, "--ignore-robots", help="Skip robots.txt compliance"),
 ) -> None:
     """Crawl a site by following internal links."""
-    _not_implemented("crawl")
+    import icerun.crawler as crawler
+    from icerun import parser as parser_mod
+
+    async def _run_crawl() -> None:
+        output.mkdir(parents=True, exist_ok=True)
+        manifest: dict[str, str] = {}
+
+        async for result in crawler.crawl(
+            start_url,
+            depth=depth,
+            limit=limit,
+            include=list(include or []),
+            exclude=list(exclude or []),
+            same_domain=same_domain,
+            delay=delay,
+            concurrency=concurrency,
+            ignore_robots=ignore_robots,
+        ):
+            # Build a filesystem-safe slug from the URL
+            from urllib.parse import urlparse as _urlparse
+            parsed = _urlparse(result.url)
+            slug_path = (parsed.netloc + parsed.path).strip("/").replace("/", "_").replace(":", "_")
+            if not slug_path:
+                slug_path = "index"
+            # Append format extension
+            ext_map = {"markdown": "md", "html": "html", "json": "json"}
+            ext = ext_map.get(format, "md")
+            filename = f"{slug_path}.{ext}"
+            # Avoid filename collisions
+            counter = 0
+            candidate = filename
+            while (output / candidate).exists() and manifest.get(result.url) != candidate:
+                counter += 1
+                candidate = f"{slug_path}_{counter}.{ext}"
+            filename = candidate
+
+            # Parse and format content
+            try:
+                parse_result = parser_mod.parse(result.content, result.url, format=format)
+                if format == "markdown":
+                    text = parse_result.markdown or ""
+                elif format == "html":
+                    text = parse_result.html or parse_result.markdown or ""
+                elif format == "json":
+                    text = json.dumps({
+                        "url": result.url,
+                        "depth": result.depth,
+                        "title": parse_result.title,
+                        "markdown": parse_result.markdown,
+                        "links": result.links,
+                    }, ensure_ascii=False, indent=2)
+                else:
+                    text = parse_result.markdown or ""
+            except Exception as e:
+                typer.echo(f"Warning: parse error for {result.url}: {e}", err=True)
+                text = result.content.decode("utf-8", errors="replace")
+
+            (output / filename).write_text(text, encoding="utf-8")
+            manifest[result.url] = filename
+
+        # Write manifest
+        manifest_path = output / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        typer.echo(f"Crawled {len(manifest)} pages -> {output}", err=True)
+
+    asyncio.run(_run_crawl())
 
 
 @app.command(name="map")
