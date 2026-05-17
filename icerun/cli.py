@@ -251,6 +251,7 @@ async def _batch_core(
     errors_file: Path,
     job_id: Optional[str] = None,
     db_path: Optional[str] = None,
+    proxy: Optional[str] = None,
 ) -> tuple[int, int, int]:
     """Core async batch fetch/parse/write loop.
 
@@ -298,6 +299,7 @@ async def _batch_core(
                 fetch_result = await scraper_mod.fetch(
                     url,
                     rate_limiter=rate_limiter,
+                    proxy=proxy,
                 )
                 if fetch_result.error:
                     raise RuntimeError(fetch_result.error)
@@ -373,8 +375,13 @@ def batch(
     parser: str = typer.Option("trafilatura", "--parser", help="Parser backend"),
     naming: str = typer.Option("hash", "--naming", help="Output filename scheme: hash|domain-slug|index"),
     errors_file: Path = typer.Option(Path("errors.txt"), "--errors-file", help="Write failed URLs here"),
+    proxy: Optional[str] = typer.Option(None, "--proxy", help="Proxy URL (overrides ICER_PROXY env var)"),
 ) -> None:
     """Batch scrape many URLs concurrently."""
+    if proxy is None:
+        from icerun.proxy import ProxyPool
+        proxy = ProxyPool.from_env().get()
+
     # Validate urls_file exists
     if not urls_file.exists():
         typer.echo(f"Error: URLs file not found: {urls_file}", err=True)
@@ -404,6 +411,7 @@ def batch(
             "resume": resume,
             "concurrency": concurrency,
             "rate_limit": rate_limit,
+            "proxy": proxy,
         }
         job_id = jobs_mod.create_job(params=params, total=len(urls))
 
@@ -478,6 +486,7 @@ def batch(
             concurrency=concurrency,
             rate_limit=rate_limit,
             errors_file=errors_file,
+            proxy=proxy,
         )
     )
 
@@ -506,10 +515,15 @@ def crawl(
     delay: float = typer.Option(1.0, "--delay", help="Seconds between requests to same domain"),
     sitemap: bool = typer.Option(False, "--sitemap", help="Use sitemap.xml for seed URLs"),
     ignore_robots: bool = typer.Option(False, "--ignore-robots", help="Skip robots.txt compliance"),
+    proxy: Optional[str] = typer.Option(None, "--proxy", help="Proxy URL (overrides ICER_PROXY env var)"),
 ) -> None:
     """Crawl a site by following internal links."""
     import icerun.crawler as crawler
     from icerun import parser as parser_mod
+
+    if proxy is None:
+        from icerun.proxy import ProxyPool
+        proxy = ProxyPool.from_env().get()
 
     async def _run_crawl() -> None:
         output.mkdir(parents=True, exist_ok=True)
@@ -525,6 +539,7 @@ def crawl(
             delay=delay,
             concurrency=concurrency,
             ignore_robots=ignore_robots,
+            proxy=proxy,
         ):
             # Build a filesystem-safe slug from the URL
             from urllib.parse import urlparse as _urlparse
@@ -589,9 +604,14 @@ def map_cmd(
     filter_pattern: Optional[str] = typer.Option(None, "--filter", help="URL glob filter"),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file (default: stdout)"),
     format: str = typer.Option("lines", "--format", "-f", help="Output: lines|json|csv"),
+    proxy: Optional[str] = typer.Option(None, "--proxy", help="Proxy URL (overrides ICER_PROXY env var)"),
 ) -> None:
     """Discover all URLs on a site without downloading content."""
     import icerun.crawler as crawler
+
+    if proxy is None:
+        from icerun.proxy import ProxyPool
+        proxy = ProxyPool.from_env().get()
 
     results = asyncio.run(
         crawler.map_site(
@@ -600,6 +620,7 @@ def map_cmd(
             filter_pattern=filter_pattern,
             crawl_fallback=crawl_fallback,
             depth=depth,
+            proxy=proxy,
         )
     )
 

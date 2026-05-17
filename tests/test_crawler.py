@@ -450,3 +450,83 @@ async def test_map_site_crawl_fallback():
         assert r.source == "crawl"
     urls = {r.url for r in results}
     assert "https://example.com" in urls
+
+
+# ===========================================================================
+# Proxy threading tests (ICER-20, ICER-21)
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_crawl_proxy_passed_to_page_fetch():
+    """crawl() forwards proxy= to every page fetch call."""
+    TEST_PROXY = "http://proxy.test:8080"
+    mock_fetch = _make_fetch_mock(PAGES)
+    with patch("icerun.scraper.fetch", new=mock_fetch):
+        results = await _collect(
+            crawl(
+                "https://example.com/a",
+                depth=1, limit=100,
+                same_domain=True, delay=0, concurrency=1,
+                ignore_robots=True,
+                proxy=TEST_PROXY,
+            )
+        )
+    assert len(results) == 3
+    # Every call should carry the proxy kwarg
+    page_calls = [c for c in mock_fetch.call_args_list
+                  if "/robots.txt" not in str(c.args)]
+    assert all(c.kwargs.get("proxy") == TEST_PROXY for c in page_calls), \
+        f"Some page fetches missing proxy: {mock_fetch.call_args_list}"
+
+
+@pytest.mark.asyncio
+async def test_map_site_proxy_passed_to_sitemap_fetch():
+    """map_site() forwards proxy= when fetching sitemap.xml."""
+    TEST_PROXY = "http://proxy.test:8080"
+
+    async def _fetch(url, **kwargs):
+        if url == "https://example.com/sitemap.xml":
+            return _map_fr(url, SITEMAP_XML)
+        return _map_404(url)
+
+    with patch("icerun.scraper.fetch", new=AsyncMock(side_effect=_fetch)) as mock_fetch:
+        results = await map_site("https://example.com", proxy=TEST_PROXY)
+
+    assert len(results) == 3
+    sitemap_calls = [c for c in mock_fetch.call_args_list
+                     if "sitemap.xml" in str(c.args)]
+    assert all(c.kwargs.get("proxy") == TEST_PROXY for c in sitemap_calls), \
+        f"Sitemap fetches missing proxy: {mock_fetch.call_args_list}"
+
+
+@pytest.mark.asyncio
+async def test_map_site_crawl_fallback_proxy():
+    """map_site() with crawl_fallback=True forwards proxy= to BFS fetches."""
+    TEST_PROXY = "http://proxy.test:8080"
+
+    start_html = b"""<html><body>
+    <a href="https://example.com/leaf">Leaf</a>
+    </body></html>"""
+    leaf_html = b"<html><body><p>leaf</p></body></html>"
+
+    async def _fetch(url, **kwargs):
+        if url in ("https://example.com/sitemap.xml", "https://example.com/robots.txt"):
+            return _map_404(url)
+        return FetchResult(
+            url=url, final_url=url, status_code=200,
+            content_type="text/html",
+            content=start_html if url == "https://example.com" else leaf_html,
+        )
+
+    with patch("icerun.scraper.fetch", new=AsyncMock(side_effect=_fetch)) as mock_fetch:
+        results = await map_site(
+            "https://example.com", crawl_fallback=True, depth=2, limit=10,
+            proxy=TEST_PROXY,
+        )
+
+    assert len(results) >= 1
+    # All page fetches (not sitemap/robots 404s) must carry the proxy
+    page_calls = [c for c in mock_fetch.call_args_list
+                  if "sitemap" not in str(c.args) and "robots" not in str(c.args)]
+    assert all(c.kwargs.get("proxy") == TEST_PROXY for c in page_calls), \
+        f"BFS fallback fetches missing proxy: {mock_fetch.call_args_list}"

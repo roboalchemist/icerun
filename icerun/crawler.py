@@ -38,6 +38,7 @@ async def crawl(
     delay: float = 1.0,
     concurrency: int = 3,
     ignore_robots: bool = False,
+    proxy: Optional[str] = None,
 ) -> AsyncIterator[CrawlResult]:
     """Crawl a site via BFS link following.
 
@@ -62,7 +63,7 @@ async def crawl(
         import urllib.robotparser as urobot
 
         robots_url = f"{start_parsed.scheme}://{start_parsed.netloc}/robots.txt"
-        robots_result = await scraper.fetch(robots_url, rate_limiter=rate_limiter, retries=1)
+        robots_result = await scraper.fetch(robots_url, rate_limiter=rate_limiter, retries=1, proxy=proxy)
         if not robots_result.error and robots_result.status_code == 200:
             rp = urobot.RobotFileParser()
             lines = robots_result.content.decode("utf-8", errors="replace").splitlines()
@@ -130,7 +131,7 @@ async def crawl(
 
             url, current_depth = item
             try:
-                fetch_result = await scraper.fetch(url, rate_limiter=rate_limiter)
+                fetch_result = await scraper.fetch(url, rate_limiter=rate_limiter, proxy=proxy)
                 if fetch_result.error or fetch_result.status_code == 0:
                     return_item = None
                 else:
@@ -252,6 +253,7 @@ async def _fetch_sitemap_urls(
     filter_pattern: Optional[str],
     results: list[DiscoveredURL],
     fetched_sitemaps: set[str],
+    proxy: Optional[str] = None,
 ) -> None:
     """Recursively fetch and parse a sitemap URL, appending to results."""
     from icerun import scraper
@@ -260,7 +262,7 @@ async def _fetch_sitemap_urls(
         return
     fetched_sitemaps.add(sitemap_url)
 
-    fetch_result = await scraper.fetch(sitemap_url, retries=1)
+    fetch_result = await scraper.fetch(sitemap_url, retries=1, proxy=proxy)
     if fetch_result.error or fetch_result.status_code != 200:
         return
 
@@ -271,7 +273,7 @@ async def _fetch_sitemap_urls(
         if len(results) >= limit:
             return
         await _fetch_sitemap_urls(
-            child_url, base_netloc, limit, filter_pattern, results, fetched_sitemaps
+            child_url, base_netloc, limit, filter_pattern, results, fetched_sitemaps, proxy=proxy
         )
 
     # Add page URLs from this sitemap
@@ -299,6 +301,7 @@ async def _bfs_map(
     limit: int,
     depth: int,
     filter_pattern: Optional[str],
+    proxy: Optional[str] = None,
 ) -> list[DiscoveredURL]:
     """BFS link-follow map (no content retained, links only)."""
     from icerun import scraper
@@ -318,7 +321,7 @@ async def _bfs_map(
     while not queue.empty() and len(results) < limit:
         url, current_depth, parent = await queue.get()
 
-        fetch_result = await scraper.fetch(url, retries=1)
+        fetch_result = await scraper.fetch(url, retries=1, proxy=proxy)
         if fetch_result.error or fetch_result.status_code == 0:
             continue
 
@@ -337,7 +340,7 @@ async def _bfs_map(
                 break
 
         # Enqueue links if within depth
-        if current_depth < depth - 1:
+        if current_depth < depth:
             links = _extract_links(fetch_result.content, url)
             for link in links:
                 defragged, _ = urldefrag(link)
@@ -358,6 +361,7 @@ async def map_site(
     filter_pattern: Optional[str] = None,
     crawl_fallback: bool = False,
     depth: int = 5,
+    proxy: Optional[str] = None,
 ) -> list[DiscoveredURL]:
     """Discover all URLs on a site via sitemap.xml or BFS link crawl.
 
@@ -375,16 +379,16 @@ async def map_site(
 
     # --- Step 1: Try /sitemap.xml directly ---
     sitemap_url = f"{base}/sitemap.xml"
-    sitemap_result = await scraper.fetch(sitemap_url, retries=1)
+    sitemap_result = await scraper.fetch(sitemap_url, retries=1, proxy=proxy)
     if not sitemap_result.error and sitemap_result.status_code == 200:
         await _fetch_sitemap_urls(
-            sitemap_url, netloc, limit, filter_pattern, results, fetched_sitemaps
+            sitemap_url, netloc, limit, filter_pattern, results, fetched_sitemaps, proxy=proxy
         )
 
     # --- Step 2: If sitemap.xml failed, try robots.txt for Sitemap directives ---
     if not results:
         robots_url = f"{base}/robots.txt"
-        robots_result = await scraper.fetch(robots_url, retries=1)
+        robots_result = await scraper.fetch(robots_url, retries=1, proxy=proxy)
         if not robots_result.error and robots_result.status_code == 200:
             robots_text = robots_result.content.decode("utf-8", errors="replace")
             for line in robots_text.splitlines():
@@ -395,11 +399,11 @@ async def map_site(
                     directive_url = stripped[len("sitemap:"):].strip()
                     if directive_url:
                         await _fetch_sitemap_urls(
-                            directive_url, netloc, limit, filter_pattern, results, fetched_sitemaps
+                            directive_url, netloc, limit, filter_pattern, results, fetched_sitemaps, proxy=proxy
                         )
 
     # --- Step 3: BFS crawl fallback ---
     if not results and crawl_fallback:
-        results = await _bfs_map(url, limit, depth, filter_pattern)
+        results = await _bfs_map(url, limit, depth, filter_pattern, proxy=proxy)
 
     return results

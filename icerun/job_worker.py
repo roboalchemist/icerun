@@ -75,6 +75,7 @@ async def _run_batch_job(job_id: str, params: dict, db_path: str | None) -> None
     concurrency = int(params.get("concurrency", 5))
     rate_limit = params.get("rate_limit")
     resume = bool(params.get("resume", False))
+    proxy_url = params.get("proxy")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -140,7 +141,7 @@ async def _run_batch_job(job_id: str, params: dict, db_path: str | None) -> None
                     return
 
             try:
-                fetch_result = await scraper_mod.fetch(url, rate_limiter=rate_limiter)
+                fetch_result = await scraper_mod.fetch(url, rate_limiter=rate_limiter, proxy=proxy_url)
                 if fetch_result.error:
                     raise RuntimeError(fetch_result.error)
 

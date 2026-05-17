@@ -285,3 +285,81 @@ def test_config_show_runs(clean_config):
 def test_config_set_invalid_key():
     result = runner.invoke(app, ["config", "set", "badkey", "value"])
     assert result.exit_code == 1
+
+
+# ===========================================================================
+# Proxy CLI wiring tests (ICER-18, ICER-20, ICER-21)
+# ===========================================================================
+
+def test_batch_proxy_passed_to_fetch(tmp_path):
+    """--proxy is forwarded to scraper.fetch() in batch command."""
+    TEST_PROXY = "http://proxy.test:9090"
+    url_file = tmp_path / "urls.txt"
+    url_file.write_text("https://example.com/page1\n", encoding="utf-8")
+    out_dir = tmp_path / "output"
+
+    captured_proxies: list = []
+
+    async def mock_fetch(url, **kwargs):
+        captured_proxies.append(kwargs.get("proxy"))
+        return _make_fetch_result(url=url, final_url=url)
+
+    with patch("icerun.scraper.fetch", side_effect=mock_fetch):
+        result = runner.invoke(app, [
+            "batch", str(url_file),
+            "--output", str(out_dir),
+            "--proxy", TEST_PROXY,
+        ])
+
+    assert result.exit_code == 0, f"output: {result.output}, exc: {result.exception}"
+    assert any(p == TEST_PROXY for p in captured_proxies), \
+        f"proxy not forwarded to fetch(); captured: {captured_proxies}"
+
+
+def test_crawl_proxy_passed_to_crawler(tmp_path):
+    """--proxy is forwarded to crawler.crawl() in crawl command."""
+    TEST_PROXY = "http://proxy.test:9090"
+    out_dir = tmp_path / "crawl-out"
+
+    from icerun.crawler import CrawlResult
+
+    async def _fake_crawl(*args, **kwargs):
+        assert kwargs.get("proxy") == TEST_PROXY, \
+            f"crawler.crawl() not passed proxy={TEST_PROXY!r}, got {kwargs.get('proxy')!r}"
+        yield CrawlResult(url="https://example.com/", depth=0, content=HTML_CONTENT, links=[])
+
+    with patch("icerun.crawler.crawl", new=_fake_crawl):
+        result = runner.invoke(app, [
+            "crawl", "https://example.com/",
+            "--output", str(out_dir),
+            "--depth", "1",
+            "--ignore-robots",
+            "--proxy", TEST_PROXY,
+        ])
+
+    assert result.exit_code == 0, f"output: {result.output}, exc: {result.exception}"
+
+
+def test_map_proxy_passed_to_map_site():
+    """--proxy is forwarded to crawler.map_site() in map command."""
+    TEST_PROXY = "http://proxy.test:9090"
+    from icerun.crawler import DiscoveredURL
+
+    captured_proxy = []
+
+    async def _fake_map_site(*args, **kwargs):
+        captured_proxy.append(kwargs.get("proxy"))
+        return [
+            DiscoveredURL(url="https://example.com/p1", source="sitemap",
+                          depth=0, parent=None, last_modified=None),
+        ]
+
+    with patch("icerun.crawler.map_site", new=_fake_map_site):
+        result = runner.invoke(app, [
+            "map", "https://example.com",
+            "--proxy", TEST_PROXY,
+        ])
+
+    assert result.exit_code == 0, f"output: {result.output}, exc: {result.exception}"
+    assert captured_proxy and captured_proxy[0] == TEST_PROXY, \
+        f"map_site() not passed proxy={TEST_PROXY!r}, got {captured_proxy}"
