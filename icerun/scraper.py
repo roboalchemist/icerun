@@ -62,8 +62,42 @@ async def fetch(
     retries: int = 3,
     impersonate: str = "chrome",
     rate_limiter: Optional[DomainRateLimiter] = None,
+    use_browser: bool = False,
+    headless: bool = True,
+    screenshot: bool = False,
+    actions: Optional[list] = None,
 ) -> FetchResult:
-    """Fetch a URL using curl_cffi with TLS impersonation and optional proxy."""
+    """Fetch a URL using curl_cffi with TLS impersonation and optional proxy.
+
+    When use_browser=True, delegates to browser_fetch (requires camoufox to be
+    installed via ``uv sync --extra browser``).
+    """
+    if use_browser:
+        try:
+            from icerun.browser import browser_fetch
+        except ImportError:
+            raise ImportError(
+                "camoufox is not installed. Install with: uv sync --extra browser\n"
+                "Then fetch the Firefox binary: python -m camoufox fetch"
+            )
+        browser_result = await browser_fetch(
+            url,
+            proxy=proxy,
+            timeout=timeout,
+            actions=actions,
+            headless=headless,
+            screenshot=screenshot,
+        )
+        return FetchResult(
+            url=browser_result.url,
+            final_url=browser_result.url,
+            status_code=browser_result.status_code,
+            content_type="text/html",
+            content=browser_result.content,
+            headers=browser_result.headers,
+            error=browser_result.error,
+        )
+
     rl = rate_limiter or _default_rate_limiter
     merged_headers = {**_DEFAULT_HEADERS, **(headers or {})}
 

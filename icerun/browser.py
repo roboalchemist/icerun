@@ -2,8 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse
+
+
+@dataclass
+class BrowserResult:
+    """Result from a browser_fetch call."""
+    url: str
+    html: str
+    content: bytes
+    status_code: int
+    headers: dict
+    screenshot_bytes: Optional[bytes] = None
+    error: Optional[str] = None
 
 
 def _require_camoufox() -> None:
@@ -51,10 +64,6 @@ async def execute_action(page: object, action: str, timeout_ms: int = 30000) -> 
         raise ValueError(f"Unknown browser action: {action!r}")
 
 
-# Import FetchResult here to avoid circular imports — scraper is a core module
-from icerun.scraper import FetchResult
-
-
 async def browser_fetch(
     url: str,
     proxy: Optional[str] = None,
@@ -62,12 +71,12 @@ async def browser_fetch(
     actions: Optional[list[str]] = None,
     headless: bool = True,
     screenshot: bool = False,
-) -> tuple[FetchResult, Optional[bytes]]:
+) -> BrowserResult:
     """
     Fetch a URL using camoufox browser with optional proxy and page actions.
 
-    Returns (FetchResult, screenshot_bytes) where screenshot_bytes is None
-    unless screenshot=True was requested.
+    Returns a BrowserResult dataclass with url, html, content, status_code,
+    headers, screenshot_bytes, and error fields.
     """
     _require_camoufox()
     from camoufox import AsyncCamoufox
@@ -94,7 +103,7 @@ async def browser_fetch(
                 )
 
             status_code = response.status if response else 0
-            final_url = page.url
+            resp_headers = dict(response.headers) if response else {}
 
             # Execute pre-scrape actions
             for action in (actions or []):
@@ -107,14 +116,15 @@ async def browser_fetch(
             if screenshot:
                 screenshot_bytes = await page.screenshot(full_page=True, type="png")
 
-            result = FetchResult(
-                url=url,
-                final_url=final_url,
-                status_code=status_code,
-                content_type="text/html",
-                content=content,
-            )
         finally:
             await context.close()
 
-    return result, screenshot_bytes
+    return BrowserResult(
+        url=url,
+        html=html_str,
+        content=content,
+        status_code=status_code,
+        headers=resp_headers,
+        screenshot_bytes=screenshot_bytes,
+        error=None,
+    )
