@@ -1,10 +1,14 @@
 import asyncio
+import hashlib
 import json
+import re
 import sys
+import time
 import typer
 from datetime import datetime, timezone
 from typing import Optional, List
 from pathlib import Path
+from urllib.parse import urlparse
 
 app = typer.Typer(
     name="icerun",
@@ -44,6 +48,44 @@ def _not_implemented(cmd: str) -> None:
     from rich.panel import Panel
     Console(stderr=True).print(Panel(f"[yellow]Not yet implemented: {cmd}[/yellow]"))
     raise typer.Exit(1)
+
+
+# Extension mapping for output file naming
+_FORMAT_EXT: dict[str, str] = {
+    "markdown": ".md",
+    "html": ".html",
+    "json": ".json",
+    "links": ".txt",
+}
+
+
+def _format_output(parse_result: object, url: str, format: str) -> str:
+    """Convert a ParseResult to a text string for the given format.
+
+    Shared by scrape and batch commands to avoid duplication.
+    """
+    from icerun import parser as parser_mod
+
+    if format == "markdown":
+        return parse_result.markdown or ""
+    elif format == "html":
+        return parse_result.html or parse_result.markdown or ""
+    elif format == "json":
+        return json.dumps(
+            {
+                "url": url,
+                "title": parse_result.title,
+                "markdown": parse_result.markdown,
+                "links": parse_result.links,
+                "metadata": _sanitize_for_json(parse_result.metadata),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    elif format == "links":
+        return "\n".join(parse_result.links)
+    else:
+        raise ValueError(f"Unknown format {format!r}")
 
 
 @app.command()
@@ -199,9 +241,181 @@ def batch(
     resume: bool = typer.Option(False, "--resume", help="Skip already-scraped URLs"),
     async_mode: bool = typer.Option(False, "--async", help="Return job ID immediately"),
     rate_limit: Optional[float] = typer.Option(None, "--rate-limit", help="Max requests/second per domain"),
+    parser: str = typer.Option("trafilatura", "--parser", help="Parser backend"),
+    naming: str = typer.Option("hash", "--naming", help="Output filename scheme: hash|domain-slug|index"),
+    errors_file: Path = typer.Option(Path("errors.txt"), "--errors-file", help="Write failed URLs here"),
 ) -> None:
     """Batch scrape many URLs concurrently."""
-    _not_implemented("batch")
+    # --async mode requires ICER-13 job system
+    if async_mode:
+        typer.echo(
+            "Error: async mode requires the job system (ICER-13), not yet implemented",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Validate urls_file exists
+    if not urls_file.exists():
+        typer.echo(f"Error: URLs file not found: {urls_file}", err=True)
+        raise typer.Exit(1)
+
+    # Read and parse URLs (skip blank lines and # comments)
+    raw_lines = urls_file.read_text(encoding="utf-8").splitlines()
+    urls = [line.strip() for line in raw_lines if line.strip() and not line.strip().startswith("#")]
+
+    if not urls:
+        typer.echo(f"Error: no URLs found in {urls_file}", err=True)
+        raise typer.Exit(1)
+
+    # Create output directory
+    output.mkdir(parents=True, exist_ok=True)
+
+    # Determine file extension for chosen format
+    ext = _FORMAT_EXT.get(format, ".txt")
+
+    # Build URL → filename mapping
+    def _make_filename(url: str, idx: int, used_names: set[str]) -> str:
+        if naming == "hash":
+            return hashlib.sha256(url.encode()).hexdigest()[:16] + ext
+        elif naming == "domain-slug":
+            parsed = urlparse(url)
+            slug = re.sub(r"[^a-zA-Z0-9]+", "-", parsed.netloc + parsed.path).strip("-")
+            slug = slug[:80]
+            candidate = slug + ext
+            # Collision avoidance: append counter suffix
+            counter = 1
+            while candidate in used_names:
+                candidate = f"{slug}-{counter}{ext}"
+                counter += 1
+            return candidate
+        elif naming == "index":
+            width = len(str(len(urls)))
+            return str(idx).zfill(width) + ext
+        else:
+            # Fallback to hash if unknown scheme
+            return hashlib.sha256(url.encode()).hexdigest()[:16] + ext
+
+    used_names: set[str] = set()
+    url_filename_pairs: list[tuple[str, str]] = []
+    for i, url in enumerate(urls):
+        fname = _make_filename(url, i, used_names)
+        used_names.add(fname)
+        url_filename_pairs.append((url, fname))
+
+    # Set up rate limiter if requested
+    from icerun.scraper import DomainRateLimiter
+    import icerun.scraper as scraper_mod
+    from icerun import parser as parser_mod
+
+    rate_limiter = DomainRateLimiter(requests_per_second=rate_limit) if rate_limit else None
+
+    # Run the async batch pipeline
+    start_time = time.monotonic()
+
+    async def _run_batch() -> tuple[int, int, int]:
+        """Returns (succeeded, failed, skipped)."""
+        from rich.progress import (
+            Progress,
+            SpinnerColumn,
+            BarColumn,
+            MofNCompleteColumn,
+            TimeElapsedColumn,
+        )
+        from rich.console import Console
+
+        sem = asyncio.Semaphore(concurrency)
+        succeeded = 0
+        failed = 0
+        skipped = 0
+        failed_urls: list[str] = []
+
+        console = Console(stderr=True, highlight=False)
+        use_progress = sys.stderr.isatty()
+
+        async def _process_one(
+            url: str, filename: str, task_id: object, progress: object
+        ) -> str:
+            """Fetch + parse + write one URL. Returns 'ok', 'skip', or 'fail'."""
+            out_path = output / filename
+
+            # --resume: skip if output already exists
+            if resume and out_path.exists():
+                if use_progress and progress is not None:
+                    progress.advance(task_id)  # type: ignore[attr-defined]
+                return "skip"
+
+            async with sem:
+                try:
+                    fetch_result = await scraper_mod.fetch(
+                        url,
+                        rate_limiter=rate_limiter,
+                    )
+                    if fetch_result.error:
+                        raise RuntimeError(fetch_result.error)
+
+                    parse_result = parser_mod.parse(
+                        fetch_result.content,
+                        url,
+                        parser=parser,
+                        format=format,
+                    )
+                    text_output = _format_output(parse_result, url, format)
+                    out_path.write_text(text_output, encoding="utf-8")
+                    if use_progress and progress is not None:
+                        progress.advance(task_id)  # type: ignore[attr-defined]
+                    return "ok"
+                except Exception as exc:
+                    failed_urls.append(url)
+                    if use_progress and progress is not None:
+                        progress.advance(task_id)  # type: ignore[attr-defined]
+                    return "fail"
+
+        if use_progress:
+            with Progress(
+                SpinnerColumn(),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+                console=Console(stderr=True),
+            ) as progress:
+                task_id = progress.add_task("Scraping...", total=len(url_filename_pairs))
+                coros = [
+                    _process_one(url, fname, task_id, progress)
+                    for url, fname in url_filename_pairs
+                ]
+                results = await asyncio.gather(*coros)
+        else:
+            coros = [
+                _process_one(url, fname, None, None)
+                for url, fname in url_filename_pairs
+            ]
+            results = await asyncio.gather(*coros)
+
+        for status in results:
+            if status == "ok":
+                succeeded += 1
+            elif status == "fail":
+                failed += 1
+            elif status == "skip":
+                skipped += 1
+
+        # Write errors file if any failures
+        if failed_urls:
+            errors_file.write_text("\n".join(failed_urls) + "\n", encoding="utf-8")
+
+        return succeeded, failed, skipped
+
+    succeeded, failed, skipped = asyncio.run(_run_batch())
+
+    elapsed = time.monotonic() - start_time
+    typer.echo(
+        f"{succeeded} succeeded, {failed} failed, {skipped} skipped in {elapsed:.1f}s",
+        err=True,
+    )
+
+    # Exit 1 if all failed or no URLs processed successfully
+    if succeeded == 0 and skipped == 0:
+        raise typer.Exit(1)
 
 
 @app.command()
