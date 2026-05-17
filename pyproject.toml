@@ -23,7 +23,8 @@ dependencies = [
 browser = ["camoufox[geoip]>=0.4"]
 extract = ["instructor>=1.0"]
 pdf = ["pdfplumber>=0.11"]
-all = ["icerun[browser,extract,pdf]"]
+search = ["ddgs"]
+all = ["icerun[browser,extract,pdf,search]"]
 
 [project.scripts]
 icerun = "icerun.cli:main"

@@ -564,7 +564,56 @@ def search(
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file"),
 ) -> None:
     """Search the web and optionally scrape each result."""
-    _not_implemented("search")
+    from icerun import search as search_mod
+    from icerun.config import load_config
+
+    config, _ = load_config()
+    api_key = config.get("search", {}).get("api_key") or None
+
+    try:
+        results = asyncio.run(search_mod.search(query, limit=limit, api_key=api_key))
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    except ImportError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+    # --scrape: fetch + parse each URL
+    if scrape and results:
+        import icerun.scraper as scraper
+        from icerun import parser as parser_mod
+        from icerun.proxy import ProxyPool
+
+        proxy_url = ProxyPool.from_env().get()
+        fetch_results = asyncio.run(
+            scraper.fetch_many([r["url"] for r in results], proxy=proxy_url)
+        )
+        for result, fr in zip(results, fetch_results):
+            if not fr.error:
+                pr = parser_mod.parse(fr.content, fr.url)
+                result["markdown"] = pr.markdown or ""
+
+    # format dispatch
+    if format == "json":
+        text = json.dumps(results, indent=2, ensure_ascii=False)
+    elif format == "markdown":
+        lines = []
+        for r in results:
+            lines.append(f"## {r['title']}\n{r['url']}\n{r['description']}")
+            if r.get("markdown"):
+                lines.append(f"\n{r['markdown']}")
+        text = "\n\n".join(lines)
+    elif format == "lines":
+        text = "\n".join(r["url"] for r in results)
+    else:
+        typer.echo(f"Error: unknown format {format!r}", err=True)
+        raise typer.Exit(2)
+
+    if output:
+        output.write_text(text, encoding="utf-8")
+    else:
+        typer.echo(text, nl=False)
 
 
 @job_app.command("status")
