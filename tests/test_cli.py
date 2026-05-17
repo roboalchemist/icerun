@@ -267,7 +267,7 @@ def test_config_help():
     assert "show" in result.output
 
 
-def test_config_show_runs():
+def test_config_show_runs(clean_config):
     result = runner.invoke(app, ["config", "show"])
     assert result.exit_code == 0
     assert "trafilatura" in result.output  # default parser
