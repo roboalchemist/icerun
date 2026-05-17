@@ -22,6 +22,7 @@ class FetchResult:
     content: bytes
     headers: dict = field(default_factory=dict)
     error: Optional[str] = None
+    screenshot_bytes: Optional[bytes] = None
 
 
 class DomainRateLimiter:
@@ -96,6 +97,7 @@ async def fetch(
             content=browser_result.content,
             headers=browser_result.headers,
             error=browser_result.error,
+            screenshot_bytes=browser_result.screenshot_bytes,
         )
 
     rl = rate_limiter or _default_rate_limiter

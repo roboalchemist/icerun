@@ -1,4 +1,8 @@
+import asyncio
+import json
+import sys
 import typer
+from datetime import datetime, timezone
 from typing import Optional, List
 from pathlib import Path
 
@@ -13,6 +17,26 @@ config_app = typer.Typer(name="config", help="Manage icerun configuration", no_a
 
 app.add_typer(job_app, name="job")
 app.add_typer(config_app, name="config")
+
+
+def _sanitize_for_json(obj: object) -> object:
+    """Recursively convert an object to JSON-serializable types.
+
+    Handles lxml _Element objects and any other non-serializable types by
+    converting them to their string representation.
+    """
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(item) for item in obj]
+    # Fallback: convert to string (handles lxml _Element and other opaque types)
+    try:
+        json.dumps(obj)
+        return obj
+    except (TypeError, ValueError):
+        return str(obj)
 
 
 def _not_implemented(cmd: str) -> None:
@@ -35,9 +59,135 @@ def scrape(
     headers: Optional[List[str]] = typer.Option(None, "--header", "-H", help="Custom headers KEY:VALUE"),
     extract: Optional[str] = typer.Option(None, "--extract", help="JSON schema for structured extraction"),
     action: Optional[List[str]] = typer.Option(None, "--action", help="Browser actions: click:SEL, scroll:bottom"),
+    wait: Optional[float] = typer.Option(None, "--wait", help="Seconds to wait after page load (browser mode)"),
 ) -> None:
     """Scrape a single URL and output content."""
-    _not_implemented("scrape")
+    from icerun.config import load_config
+    from icerun.proxy import ProxyPool
+    import icerun.scraper as scraper
+    from icerun import parser as parser_mod
+
+    # 1. Load config; CLI flags override config defaults
+    config, _ = load_config()
+
+    # 2. Parse --header KEY:VALUE pairs into dict
+    header_dict: dict = {}
+    for h in (headers or []):
+        key, _, val = h.partition(":")
+        header_dict[key.strip()] = val.strip()
+
+    # 3. Resolve proxy: CLI flag wins, else ProxyPool.from_env()
+    proxy_url: Optional[str] = proxy
+    if proxy_url is None:
+        pool = ProxyPool.from_env()
+        proxy_url = pool.get()
+
+    # 4. Build actions list; inject wait action if --wait given
+    action_list: list = list(action or [])
+    if wait is not None:
+        action_list.append(f"wait:{wait}")
+
+    # 5. Fetch
+    fetch_result = asyncio.run(
+        scraper.fetch(
+            url,
+            proxy=proxy_url,
+            headers=header_dict or None,
+            timeout=timeout,
+            use_browser=browser,
+            actions=action_list or None,
+            screenshot=(format == "screenshot"),
+        )
+    )
+
+    if fetch_result.error:
+        typer.echo(f"Error: {fetch_result.error}", err=True)
+        raise typer.Exit(1)
+
+    # 6. Format dispatch
+    try:
+        if format == "screenshot":
+            if not fetch_result.screenshot_bytes:
+                typer.echo("Error: no screenshot available (use --browser for screenshot support)", err=True)
+                raise typer.Exit(1)
+            if output:
+                output.write_bytes(fetch_result.screenshot_bytes)
+            else:
+                sys.stdout.buffer.write(fetch_result.screenshot_bytes)
+            return
+
+        # Parse HTML for all text formats
+        parse_result = parser_mod.parse(fetch_result.content, url, parser=parser, format=format)
+
+        if format == "markdown":
+            text_output = parse_result.markdown or ""
+        elif format == "html":
+            text_output = parse_result.html or parse_result.markdown or ""
+        elif format == "json":
+            text_output = json.dumps({
+                "url": url,
+                "title": parse_result.title,
+                "markdown": parse_result.markdown,
+                "links": parse_result.links,
+                "metadata": _sanitize_for_json(parse_result.metadata),
+            }, ensure_ascii=False, indent=2)
+        elif format == "links":
+            text_output = "\n".join(parse_result.links)
+        else:
+            typer.echo(f"Error: unknown format {format!r}", err=True)
+            raise typer.Exit(2)
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        typer.echo(f"Parse error: {e}", err=True)
+        raise typer.Exit(2)
+
+    # 7. Prepend metadata header if requested
+    if metadata:
+        title = parse_result.title or ""
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        meta_header = (
+            f"---\n"
+            f"url: {url}\n"
+            f"title: {title}\n"
+            f"parser: {parser}\n"
+            f"timestamp: {ts}\n"
+            f"---\n\n"
+        )
+        text_output = meta_header + text_output
+
+    # 8. --extract: structured extraction via instructor (optional dep)
+    if extract:
+        try:
+            import instructor
+            import anthropic as anthropic_sdk
+        except ImportError:
+            typer.echo("Error: --extract requires 'instructor' package. Install with: uv sync --extra extract", err=True)
+            raise typer.Exit(1)
+        try:
+            schema = json.loads(extract)
+            from pydantic import create_model
+            fields = {k: (str, ...) for k in schema.get("properties", {}).keys()}
+            DynModel = create_model("Extracted", **fields)  # type: ignore[call-overload]
+            llm_cfg = config.get("llm", {})
+            client = instructor.from_anthropic(anthropic_sdk.Anthropic(api_key=llm_cfg.get("api_key") or None))
+            extracted = client.chat.completions.create(
+                model=llm_cfg.get("model", "claude-sonnet-4-6"),
+                max_tokens=4096,
+                messages=[{"role": "user", "content": f"Extract structured data from:\n\n{text_output}"}],
+                response_model=DynModel,
+            )
+            text_output = json.dumps(extracted.model_dump(), ensure_ascii=False, indent=2)
+        except json.JSONDecodeError as e:
+            typer.echo(f"Error: --extract value must be a JSON schema: {e}", err=True)
+            raise typer.Exit(1)
+
+    # 9. Write output
+    if output:
+        output.write_text(text_output, encoding="utf-8")
+    else:
+        typer.echo(text_output, nl=False)
 
 
 @app.command()
