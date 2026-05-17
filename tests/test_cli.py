@@ -45,3 +45,14 @@ def test_config_help():
     result = runner.invoke(app, ["config", "--help"])
     assert result.exit_code == 0
     assert "show" in result.output
+
+
+def test_config_show_runs():
+    result = runner.invoke(app, ["config", "show"])
+    assert result.exit_code == 0
+    assert "trafilatura" in result.output  # default parser
+
+
+def test_config_set_invalid_key():
+    result = runner.invoke(app, ["config", "set", "badkey", "value"])
+    assert result.exit_code == 1
