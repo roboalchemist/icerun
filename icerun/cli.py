@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -226,6 +227,129 @@ def scrape(
         typer.echo(text_output, nl=False)
 
 
+async def _batch_core(
+    urls: list[str],
+    url_filename_pairs: list[tuple[str, str]],
+    output: Path,
+    format: str,
+    parser: str,
+    naming: str,
+    resume: bool,
+    concurrency: int,
+    rate_limit: Optional[float],
+    errors_file: Path,
+    job_id: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> tuple[int, int, int]:
+    """Core async batch fetch/parse/write loop.
+
+    Shared between synchronous batch() and the background job_worker.
+    Returns (succeeded, failed, skipped).
+    """
+    from rich.progress import (
+        Progress,
+        SpinnerColumn,
+        BarColumn,
+        MofNCompleteColumn,
+        TimeElapsedColumn,
+    )
+    from rich.console import Console
+    import icerun.scraper as scraper_mod
+    from icerun import parser as parser_mod
+    from icerun.scraper import DomainRateLimiter
+
+    rate_limiter = DomainRateLimiter(requests_per_second=rate_limit) if rate_limit else None
+    sem = asyncio.Semaphore(concurrency)
+    succeeded = 0
+    failed = 0
+    skipped = 0
+    failed_urls: list[str] = []
+
+    use_progress = sys.stderr.isatty()
+
+    async def _process_one(
+        url: str, filename: str, task_id: object, progress: object
+    ) -> str:
+        """Fetch + parse + write one URL. Returns 'ok', 'skip', or 'fail'."""
+        out_path = output / filename
+
+        # --resume: skip if output already exists
+        if resume and out_path.exists():
+            if use_progress and progress is not None:
+                progress.advance(task_id)  # type: ignore[attr-defined]
+            if job_id:
+                from icerun import jobs as jobs_mod
+                jobs_mod.add_result(job_id, url, "skip", str(out_path), None, db_path=db_path)
+            return "skip"
+
+        async with sem:
+            try:
+                fetch_result = await scraper_mod.fetch(
+                    url,
+                    rate_limiter=rate_limiter,
+                )
+                if fetch_result.error:
+                    raise RuntimeError(fetch_result.error)
+
+                parse_result = parser_mod.parse(
+                    fetch_result.content,
+                    url,
+                    parser=parser,
+                    format=format,
+                )
+                text_output = _format_output(parse_result, url, format)
+                out_path.write_text(text_output, encoding="utf-8")
+                if use_progress and progress is not None:
+                    progress.advance(task_id)  # type: ignore[attr-defined]
+                if job_id:
+                    from icerun import jobs as jobs_mod
+                    jobs_mod.add_result(job_id, url, "ok", str(out_path), None, db_path=db_path)
+                return "ok"
+            except Exception as exc:
+                failed_urls.append(url)
+                if use_progress and progress is not None:
+                    progress.advance(task_id)  # type: ignore[attr-defined]
+                if job_id:
+                    from icerun import jobs as jobs_mod
+                    jobs_mod.add_result(job_id, url, "fail", None, str(exc), db_path=db_path)
+                return "fail"
+
+    if use_progress:
+        with Progress(
+            SpinnerColumn(),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=Console(stderr=True),
+        ) as progress:
+            task_id = progress.add_task("Scraping...", total=len(url_filename_pairs))
+            coros = [
+                _process_one(url, fname, task_id, progress)
+                for url, fname in url_filename_pairs
+            ]
+            results = await asyncio.gather(*coros)
+    else:
+        coros = [
+            _process_one(url, fname, None, None)
+            for url, fname in url_filename_pairs
+        ]
+        results = await asyncio.gather(*coros)
+
+    for status in results:
+        if status == "ok":
+            succeeded += 1
+        elif status == "fail":
+            failed += 1
+        elif status == "skip":
+            skipped += 1
+
+    # Write errors file if any failures
+    if failed_urls:
+        errors_file.write_text("\n".join(failed_urls) + "\n", encoding="utf-8")
+
+    return succeeded, failed, skipped
+
+
 @app.command()
 def batch(
     urls_file: Path = typer.Argument(..., help="File with one URL per line"),
@@ -240,14 +364,6 @@ def batch(
     errors_file: Path = typer.Option(Path("errors.txt"), "--errors-file", help="Write failed URLs here"),
 ) -> None:
     """Batch scrape many URLs concurrently."""
-    # --async mode requires ICER-13 job system
-    if async_mode:
-        typer.echo(
-            "Error: async mode requires the job system (ICER-13), not yet implemented",
-            err=True,
-        )
-        raise typer.Exit(1)
-
     # Validate urls_file exists
     if not urls_file.exists():
         typer.echo(f"Error: URLs file not found: {urls_file}", err=True)
@@ -260,6 +376,46 @@ def batch(
     if not urls:
         typer.echo(f"Error: no URLs found in {urls_file}", err=True)
         raise typer.Exit(1)
+
+    # --async mode: create job record and launch background worker
+    if async_mode:
+        from icerun import jobs as jobs_mod
+        import subprocess
+
+        output.mkdir(parents=True, exist_ok=True)
+
+        params = {
+            "urls": urls,
+            "output": str(output),
+            "format": format,
+            "parser": parser,
+            "naming": naming,
+            "resume": resume,
+            "concurrency": concurrency,
+            "rate_limit": rate_limit,
+        }
+        job_id = jobs_mod.create_job(params=params, total=len(urls))
+
+        # Determine log file path
+        log_dir = jobs_mod._db_path().parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"{job_id}.log"
+
+        cmd = [sys.executable, "-m", "icerun.job_worker", job_id]
+        db_path = os.environ.get("ICER_JOBS_DB")
+        if db_path:
+            cmd.append(db_path)
+
+        with open(log_path, "w") as log_fh:
+            subprocess.Popen(
+                cmd,
+                start_new_session=True,
+                stdout=log_fh,
+                stderr=log_fh,
+            )
+
+        typer.echo(job_id)
+        return
 
     # Create output directory
     output.mkdir(parents=True, exist_ok=True)
@@ -296,110 +452,23 @@ def batch(
         used_names.add(fname)
         url_filename_pairs.append((url, fname))
 
-    # Set up rate limiter if requested
-    from icerun.scraper import DomainRateLimiter
-    import icerun.scraper as scraper_mod
-    from icerun import parser as parser_mod
-
-    rate_limiter = DomainRateLimiter(requests_per_second=rate_limit) if rate_limit else None
-
     # Run the async batch pipeline
     start_time = time.monotonic()
 
-    async def _run_batch() -> tuple[int, int, int]:
-        """Returns (succeeded, failed, skipped)."""
-        from rich.progress import (
-            Progress,
-            SpinnerColumn,
-            BarColumn,
-            MofNCompleteColumn,
-            TimeElapsedColumn,
+    succeeded, failed, skipped = asyncio.run(
+        _batch_core(
+            urls=urls,
+            url_filename_pairs=url_filename_pairs,
+            output=output,
+            format=format,
+            parser=parser,
+            naming=naming,
+            resume=resume,
+            concurrency=concurrency,
+            rate_limit=rate_limit,
+            errors_file=errors_file,
         )
-        from rich.console import Console
-
-        sem = asyncio.Semaphore(concurrency)
-        succeeded = 0
-        failed = 0
-        skipped = 0
-        failed_urls: list[str] = []
-
-        console = Console(stderr=True, highlight=False)
-        use_progress = sys.stderr.isatty()
-
-        async def _process_one(
-            url: str, filename: str, task_id: object, progress: object
-        ) -> str:
-            """Fetch + parse + write one URL. Returns 'ok', 'skip', or 'fail'."""
-            out_path = output / filename
-
-            # --resume: skip if output already exists
-            if resume and out_path.exists():
-                if use_progress and progress is not None:
-                    progress.advance(task_id)  # type: ignore[attr-defined]
-                return "skip"
-
-            async with sem:
-                try:
-                    fetch_result = await scraper_mod.fetch(
-                        url,
-                        rate_limiter=rate_limiter,
-                    )
-                    if fetch_result.error:
-                        raise RuntimeError(fetch_result.error)
-
-                    parse_result = parser_mod.parse(
-                        fetch_result.content,
-                        url,
-                        parser=parser,
-                        format=format,
-                    )
-                    text_output = _format_output(parse_result, url, format)
-                    out_path.write_text(text_output, encoding="utf-8")
-                    if use_progress and progress is not None:
-                        progress.advance(task_id)  # type: ignore[attr-defined]
-                    return "ok"
-                except Exception as exc:
-                    failed_urls.append(url)
-                    if use_progress and progress is not None:
-                        progress.advance(task_id)  # type: ignore[attr-defined]
-                    return "fail"
-
-        if use_progress:
-            with Progress(
-                SpinnerColumn(),
-                BarColumn(),
-                MofNCompleteColumn(),
-                TimeElapsedColumn(),
-                console=Console(stderr=True),
-            ) as progress:
-                task_id = progress.add_task("Scraping...", total=len(url_filename_pairs))
-                coros = [
-                    _process_one(url, fname, task_id, progress)
-                    for url, fname in url_filename_pairs
-                ]
-                results = await asyncio.gather(*coros)
-        else:
-            coros = [
-                _process_one(url, fname, None, None)
-                for url, fname in url_filename_pairs
-            ]
-            results = await asyncio.gather(*coros)
-
-        for status in results:
-            if status == "ok":
-                succeeded += 1
-            elif status == "fail":
-                failed += 1
-            elif status == "skip":
-                skipped += 1
-
-        # Write errors file if any failures
-        if failed_urls:
-            errors_file.write_text("\n".join(failed_urls) + "\n", encoding="utf-8")
-
-        return succeeded, failed, skipped
-
-    succeeded, failed, skipped = asyncio.run(_run_batch())
+    )
 
     elapsed = time.monotonic() - start_time
     typer.echo(
@@ -570,13 +639,72 @@ def search(
 @job_app.command("status")
 def job_status(job_id: str = typer.Argument(..., help="Job ID")) -> None:
     """Show status of an async job."""
-    _not_implemented("job status")
+    from icerun import jobs as jobs_mod
+    from rich.console import Console
+    from rich.table import Table
+
+    job = jobs_mod.get_job(job_id)
+    if job is None:
+        typer.echo(f"Error: job {job_id!r} not found", err=True)
+        raise typer.Exit(1)
+
+    console = Console()
+    table = Table(title=f"Job {job_id[:12]}...", show_header=True)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+
+    progress_str = f"{job['done']}/{job['total']}"
+    if job["total"] > 0:
+        pct = int(100 * job["done"] / job["total"])
+        progress_str += f" ({pct}%)"
+
+    table.add_row("ID", job["id"])
+    table.add_row("Type", job["type"])
+    table.add_row("Status", job["status"])
+    table.add_row("Progress", progress_str)
+    table.add_row("Done", str(job["done"]))
+    table.add_row("Failed", str(job["failed"]))
+    table.add_row("Skipped", str(job["skipped"]))
+    table.add_row("Created", job["created_at"] or "")
+    table.add_row("Started", job["started_at"] or "")
+    table.add_row("Finished", job["finished_at"] or "")
+    if job.get("error"):
+        table.add_row("Error", job["error"])
+
+    console.print(table)
 
 
 @job_app.command("watch")
 def job_watch(job_id: str = typer.Argument(..., help="Job ID")) -> None:
-    """Stream results from a running job."""
-    _not_implemented("job watch")
+    """Stream results from a running job as JSON lines."""
+    from icerun import jobs as jobs_mod
+
+    job = jobs_mod.get_job(job_id)
+    if job is None:
+        typer.echo(f"Error: job {job_id!r} not found", err=True)
+        raise typer.Exit(1)
+
+    terminal_statuses = {"completed", "done", "failed", "cancelled"}
+    last_id = 0
+
+    while True:
+        # Emit any new result rows
+        new_results = jobs_mod.get_results(job_id, after_id=last_id)
+        for row in new_results:
+            typer.echo(json.dumps({
+                "url": row["url"],
+                "status": row["status"],
+                "output_path": row["output_path"],
+                "error": row["error"],
+            }))
+            last_id = row["id"]
+
+        # Re-fetch job status
+        job = jobs_mod.get_job(job_id)
+        if job is None or job["status"] in terminal_statuses:
+            break
+
+        time.sleep(1)
 
 
 @job_app.command("list")
@@ -584,21 +712,73 @@ def job_list(
     status: Optional[str] = typer.Option(None, "--status", help="Filter by status"),
 ) -> None:
     """List all async jobs."""
-    _not_implemented("job list")
+    from icerun import jobs as jobs_mod
+    from rich.console import Console
+    from rich.table import Table
+
+    job_rows = jobs_mod.list_jobs(status=status)
+    console = Console()
+
+    if not job_rows:
+        console.print("[dim]No jobs found.[/dim]")
+        return
+
+    table = Table(title="Async Jobs", show_header=True)
+    table.add_column("ID", style="dim")
+    table.add_column("Type")
+    table.add_column("Status")
+    table.add_column("Progress")
+    table.add_column("Created")
+
+    for job in job_rows:
+        progress_str = f"{job['done']}/{job['total']}"
+        table.add_row(
+            job["id"][:12] + "...",
+            job["type"],
+            job["status"],
+            progress_str,
+            job["created_at"][:19] if job["created_at"] else "",
+        )
+
+    console.print(table)
 
 
 @job_app.command("cancel")
 def job_cancel(job_id: str = typer.Argument(..., help="Job ID")) -> None:
-    """Cancel a running job."""
-    _not_implemented("job cancel")
+    """Cancel a queued or running job."""
+    from icerun import jobs as jobs_mod
+
+    job = jobs_mod.get_job(job_id)
+    if job is None:
+        typer.echo(f"Error: job {job_id!r} not found", err=True)
+        raise typer.Exit(1)
+
+    if job["status"] not in ("queued", "running"):
+        typer.echo(
+            f"Job {job_id[:12]}... is already in terminal state: {job['status']}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    jobs_mod.update_job(job_id, status="cancelled")
+    if job["status"] == "running":
+        typer.echo(
+            f"Cancelled job {job_id[:12]}... "
+            "(note: in-flight requests will complete before the worker exits)"
+        )
+    else:
+        typer.echo(f"Cancelled job {job_id[:12]}...")
 
 
 @job_app.command("clean")
 def job_clean(
     older_than: int = typer.Option(7, "--older-than", help="Remove jobs older than N days"),
 ) -> None:
-    """Remove completed jobs older than N days."""
-    _not_implemented("job clean")
+    """Remove completed/failed/cancelled jobs older than N days."""
+    from icerun import jobs as jobs_mod
+
+    count = jobs_mod.delete_old_jobs(older_than_days=older_than)
+    typer.echo(f"Deleted {count} job(s) older than {older_than} day(s).")
 
 
 @config_app.command("show")

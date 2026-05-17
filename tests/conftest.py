@@ -12,3 +12,11 @@ def clean_config(tmp_path, monkeypatch):
     fake_config = tmp_path / "config.toml"
     monkeypatch.setattr("icerun.config.get_user_config_path", lambda: fake_config)
     return fake_config
+
+
+@pytest.fixture
+def tmp_jobs_db(tmp_path, monkeypatch):
+    """Provide a temporary jobs.db path via ICER_JOBS_DB env var."""
+    db = str(tmp_path / "test_jobs.db")
+    monkeypatch.setenv("ICER_JOBS_DB", db)
+    return db
