@@ -58,6 +58,7 @@ def scrape(
     metadata: bool = typer.Option(False, "--metadata", help="Include metadata header"),
     headers: Optional[List[str]] = typer.Option(None, "--header", "-H", help="Custom headers KEY:VALUE"),
     extract: Optional[str] = typer.Option(None, "--extract", help="JSON schema for structured extraction"),
+    extract_schema: Optional[Path] = typer.Option(None, "--extract-schema", help="Path to JSON schema file for structured extraction"),
     action: Optional[List[str]] = typer.Option(None, "--action", help="Browser actions: click:SEL, scroll:bottom"),
     wait: Optional[float] = typer.Option(None, "--wait", help="Seconds to wait after page load (browser mode)"),
 ) -> None:
@@ -157,30 +158,23 @@ def scrape(
         )
         text_output = meta_header + text_output
 
-    # 8. --extract: structured extraction via instructor (optional dep)
-    if extract:
+    # 8. --extract / --extract-schema: structured extraction via instructor (optional dep)
+    if extract or extract_schema:
         try:
-            import instructor
-            import anthropic as anthropic_sdk
-        except ImportError:
-            typer.echo("Error: --extract requires 'instructor' package. Install with: uv sync --extra extract", err=True)
+            schema_source = extract_schema.read_text(encoding="utf-8") if extract_schema else extract
+            schema_dict = json.loads(schema_source)
+        except json.JSONDecodeError as e:
+            typer.echo(f"Error: schema must be valid JSON: {e}", err=True)
+            raise typer.Exit(1)
+        except OSError as e:
+            typer.echo(f"Error: cannot read schema file: {e}", err=True)
             raise typer.Exit(1)
         try:
-            schema = json.loads(extract)
-            from pydantic import create_model
-            fields = {k: (str, ...) for k in schema.get("properties", {}).keys()}
-            DynModel = create_model("Extracted", **fields)  # type: ignore[call-overload]
-            llm_cfg = config.get("llm", {})
-            client = instructor.from_anthropic(anthropic_sdk.Anthropic(api_key=llm_cfg.get("api_key") or None))
-            extracted = client.chat.completions.create(
-                model=llm_cfg.get("model", "claude-sonnet-4-6"),
-                max_tokens=4096,
-                messages=[{"role": "user", "content": f"Extract structured data from:\n\n{text_output}"}],
-                response_model=DynModel,
-            )
-            text_output = json.dumps(extracted.model_dump(), ensure_ascii=False, indent=2)
-        except json.JSONDecodeError as e:
-            typer.echo(f"Error: --extract value must be a JSON schema: {e}", err=True)
+            from icerun.extractor import run_extraction
+            result = run_extraction(text_output, url, schema_dict, config.get("llm", {}))
+            text_output = json.dumps(result, ensure_ascii=False, indent=2)
+        except ImportError as e:
+            typer.echo(f"Error: {e}", err=True)
             raise typer.Exit(1)
 
     # 9. Write output
