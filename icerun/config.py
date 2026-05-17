@@ -30,6 +30,10 @@ DEFAULTS: dict[str, Any] = {
         "wait_timeout": 30,
         "headless": True,
     },
+    "search": {
+        "api_key": "",
+        "provider": "auto",  # auto | serper | ddg
+    },
 }
 
 VALID_KEYS: dict[str, set[str]] = {
@@ -99,6 +103,11 @@ def _apply_env_vars(config: dict, sources: dict) -> tuple[dict, dict]:
     if os.environ.get("ICER_LLM_PROVIDER"):
         config.setdefault("llm", {})["provider"] = os.environ["ICER_LLM_PROVIDER"]
         sources.setdefault("llm", {})["provider"] = "env:ICER_LLM_PROVIDER"
+
+    # SERPER_API_KEY env var for search
+    if os.environ.get("SERPER_API_KEY"):
+        config.setdefault("search", {})["api_key"] = os.environ["SERPER_API_KEY"]
+        sources.setdefault("search", {})["api_key"] = "env:SERPER_API_KEY"
 
     # LLM API keys from standard env vars
     provider = config["llm"].get("provider", "anthropic")

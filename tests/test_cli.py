@@ -250,9 +250,18 @@ def test_map_cmd_lines_format():
     assert len(url_lines) == 2
 
 
-def test_search_stub_exits_1():
-    result = runner.invoke(app, ["search", "test query"])
-    assert result.exit_code == 1
+def test_search_json_default():
+    """search command returns JSON output by default with mocked results."""
+    from icerun.scraper import FetchResult
+    fake_results = [
+        {"url": "https://example.com/1", "title": "T1", "description": "D1", "rank": 1},
+    ]
+    with patch("icerun.search.search", new=AsyncMock(return_value=fake_results)):
+        result = runner.invoke(app, ["search", "test query"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert isinstance(data, list)
+    assert data[0]["url"] == "https://example.com/1"
 
 
 def test_job_help():
