@@ -172,6 +172,10 @@ def parse(
 ) -> ParseResult:
     """Parse HTML bytes using the specified backend and return a ParseResult.
 
+    If the content begins with the PDF magic bytes ``%PDF``, it is
+    dispatched to the PDF parser transparently regardless of the
+    ``parser`` argument.
+
     Args:
         html:   Raw HTML bytes from the fetched page.
         url:    Source URL — used for resolving relative links and metadata.
@@ -184,6 +188,11 @@ def parse(
     Raises:
         ValueError: If an unknown parser name is given.
     """
+    # PDF magic-byte detection — more robust than checking content[:4] exactly
+    if b'%PDF' in html[:16]:
+        from icerun.pdf import parse_pdf
+        return parse_pdf(html, url)
+
     if parser not in _PARSERS:
         raise ValueError(f"Unknown parser '{parser}'. Choose from: {', '.join(PARSERS)}")
     return _PARSERS[parser](html, url)
