@@ -7,6 +7,22 @@ name = "icerun"
 version = "0.1.0"
 description = "Firecrawl-compatible web scraper — proxy rotation + local parsers"
 requires-python = ">=3.11"
+authors = [
+    {name = "Joe Schlesinger", email = "roboalchemist@users.noreply.github.com"},
+]
+readme = "README.md"
+license = {text = "MIT"}
+keywords = ["scraping", "web-scraping", "firecrawl", "markdown", "proxy", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "curl-cffi>=0.7",
     "typer[all]>=0.12",
@@ -25,6 +41,11 @@ extract = ["instructor>=1.0"]
 pdf = ["pdfplumber>=0.11"]
 search = ["ddgs"]
 all = ["icerun[browser,extract,pdf,search]"]
+
+[project.urls]
+Homepage = "https://github.com/roboalchemist/icerun"
+Repository = "https://github.com/roboalchemist/icerun"
+Issues = "https://github.com/roboalchemist/icerun/issues"
 
 [project.scripts]
 icerun = "icerun.cli:main"

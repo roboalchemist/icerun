@@ -288,7 +288,7 @@ def test_config_set_invalid_key():
 
 
 # ===========================================================================
-# Proxy CLI wiring tests (ICER-18, ICER-20, ICER-21)
+# Proxy CLI wiring tests
 # ===========================================================================
 
 def test_batch_proxy_passed_to_fetch(tmp_path):

@@ -453,7 +453,7 @@ async def test_map_site_crawl_fallback():
 
 
 # ===========================================================================
-# Proxy threading tests (ICER-20, ICER-21)
+# Proxy threading tests
 # ===========================================================================
 
 @pytest.mark.asyncio
